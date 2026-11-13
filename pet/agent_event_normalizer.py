@@ -54,6 +54,11 @@ class ApprovalEvent(SemanticEvent): status: str = ""
 class QuestionEvent(SemanticEvent): status: str = ""
 @dataclass(frozen=True)
 class UserActionEvent(SemanticEvent): action: str = ""
+
+@dataclass(frozen=True)
+class PlayAnimEvent(SemanticEvent):
+    """桌宠动作请求（pet/anim）：action_id 即角色包里的动作名。"""
+    action_id: str = ""
 @dataclass(frozen=True)
 class InteractionResolvedEvent(SemanticEvent):
     kind: str = ""
@@ -98,6 +103,8 @@ def normalize_event(record: AgentEvent | dict, *, source_hint: str = "", agent_n
     lower = typ.lower()
     common = dict(source=ev.source, agent_name=ev.agent_name, session_id=ev.session_id, step=ev.step, data=data,
                   event=_EVENT_ALIASES.get(lower, lower))
+    if lower == "pet/anim":
+        return PlayAnimEvent(**common, action_id=str(data.get("action_id") or data.get("actionId") or "")[:24])
     if typ in _LIFECYCLE or lower in _LIFECYCLE:
         return LifecycleEvent(**common)
     if lower in {"assistant/message", "assistant/chunk", "agent_reasoning", "agent_reasoning_raw_content", "reasoning"}:
