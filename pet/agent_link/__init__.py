@@ -94,6 +94,7 @@ def _cpp_object_alive(obj) -> bool:
 # 新增 _poll 的 event 直通分支必须同步本名单，否则该事件会被误判为桥接未知事件。
 _RAW_BRIDGE_KNOWN_EVENTS: frozenset[str] = frozenset({
     "approval/request", "approval/requested", "approval/decided", "approval/resolved",
+    "pet/anim",
     "question/requested", "question/resolved",
     "cordis/request-run", "cordis/request-run-resolved",
     "execution/failed", "model_access", "llm_error", "user_action",
@@ -3424,7 +3425,7 @@ class AgentLinkManager(QObject):
 
     def _on_normalized_event(self, event) -> None:
         """Consume semantic events for streak tracking and interaction cleanup."""
-        from ..agent_event_normalizer import InteractionResolvedEvent, RetryEvent
+        from ..agent_event_normalizer import InteractionResolvedEvent, PlayAnimEvent, RetryEvent
         if isinstance(event, RetryEvent):
             streak = self._model_access_tracker.consume(event)
             if streak:
@@ -3434,6 +3435,9 @@ class AgentLinkManager(QObject):
         if getattr(event, "session_id", ""):
             self._model_access_tracker.consume(event)
             self._model_access_retry_counts.pop((event.source, event.session_id), None)
+        if isinstance(event, PlayAnimEvent):
+            self._play_pet_action(event)
+            return
         if not isinstance(event, InteractionResolvedEvent):
             return
         matched = self._resolve_matching_interaction(
@@ -3448,6 +3452,43 @@ class AgentLinkManager(QObject):
         if matched is None:
             log.debug("interaction/resolved unmatched source=%s session=%s",
                       event.source, event.session_id)
+
+    def _play_pet_action(self, event) -> None:
+        """桌宠动作请求：把 pet/anim 的 action_id 当作角色包动作名直接播。
+
+        素材缺失（动作名不在 cats["acts"]）静默跳过；同一条回复（reply_id）只播一次；
+        60 秒前的旧记录不回放——桥接启动会重读 jsonl 尾部，不做时效判定会把上一轮
+        的动作重播一遍。
+        """
+        clip = str(getattr(event, "action_id", "") or "").strip()
+        if not clip:
+            return
+        data = event.data if isinstance(getattr(event, "data", None), dict) else {}
+        try:
+            ts = float(data.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if ts and time.time() - ts > 60:
+            return
+        acts = list(getattr(self.win, "cats", {}).get("acts", []) or [])
+        if clip not in acts:
+            log.debug("pet/anim 忽略未知动作 %s", clip)
+            return
+        rid = str(data.get("reply_id") or "")
+        seen = getattr(self, "_pet_action_seen", None)
+        if seen is None:
+            seen = self._pet_action_seen = {}
+        if rid:
+            if rid in seen:
+                return
+            seen[rid] = time.time()
+            if len(seen) > 64:
+                for k in sorted(seen, key=seen.get)[: len(seen) - 64]:
+                    seen.pop(k, None)
+        if not hasattr(self.win, "isVisible") or not self.win.isVisible():
+            return
+        if hasattr(self.win, "request_link_anim"):
+            self.win.request_link_anim(clip)
 
     def apply_config(self) -> None:
         """根据配置启停各个 Agent 监视器。
